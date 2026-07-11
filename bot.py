@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import random
 import re
 from datetime import datetime
 
@@ -15,12 +14,9 @@ from database import (
     init_db, add_api_key, remove_api_key, get_all_keys, get_active_keys,
     update_balance, update_status, get_current_key, get_next_key,
     get_total_keys, get_active_count, add_order, get_orders,
-    get_setting, set_setting
+    get_setting, set_setting, get_key_by_value
 )
-from smm_api import (
-    check_balance, place_order, get_services_by_platform_simple,
-    fetch_services
-)
+from smm_api import check_balance, place_order, get_services_by_platform_simple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,9 +24,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# হেল্পার ফাংশন
-# ============================================================
 def is_admin(user_id):
     return user_id in config.ADMIN_IDS
 
@@ -53,7 +46,7 @@ async def auto_switch_key(platform):
     return current['key'] if current else None
 
 # ============================================================
-# ইউজার কমান্ড হ্যান্ডলার
+# ইউজার কমান্ড
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -68,9 +61,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/history - আপনার অর্ডার ইতিহাস\n"
         "/status - সিস্টেম স্ট্যাটাস\n\n"
         "⚡ *অ্যাডমিন কমান্ড:*\n"
-        "/addkey <api_key> <platform> - নতুন কী যোগ করুন\n"
+        "/addkey <api_key> <platform> - নতুন কী যোগ করুন (অটো-ব্যালেন্স চেক)\n"
         "/removekey <api_key> - কী মুছুন\n"
         "/listkeys - সব কী দেখুন\n"
+        "/activatekey <api_key> - একটি কী সক্রিয় করুন\n"
+        "/checkkey <api_key> - কীটির ব্যালেন্স চেক করে স্ট্যাটাস আপডেট করুন\n"
         "/refreshservices - সার্ভিস লিস্ট রিফ্রেশ করুন",
         parse_mode="Markdown"
     )
@@ -108,9 +103,7 @@ async def platform_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ক্যাটাগরি অনুযায়ী গ্রুপ করতে চাইলে এখানে লজিক যোগ করা যেতে পারে
     keyboard = []
-    # ২০টির বেশি হলে পেজিনেশন (সহজ সমাধান: ২০টি দেখিয়ে "আরও...")
     items = list(services.items())
     if len(items) > 20:
         items = items[:20]
@@ -138,7 +131,8 @@ async def service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"📝 এখন *{platform.capitalize()}* অর্ডারের বিবরণ দিন:\n\n"
         "ফরম্যাট: `লিংক|কোয়ান্টিটি`\n"
-        "উদাহরণ: `https://t.me/username|100`",
+        "উদাহরণ: `https://t.me/username|100`\n\n"
+        "🔗 লিংক হতে পারে চ্যানেল/গ্রুপ লিংক, পোস্ট লিংক, বা যেকোনো ভ্যালিড URL।",
         parse_mode="Markdown"
     )
     context.user_data['waiting_for_order_details'] = True
@@ -207,8 +201,8 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['waiting_for_order_details'] = False
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """বর্তমান সক্রিয় কী-এর ব্যালেন্স দেখায়"""
-    platform = "telegram"  # ডিফল্ট
+    """বর্তমান সক্রিয় কী-এর ব্যালেন্স দেখায় (ডিফল্ট: telegram)"""
+    platform = "telegram"
     current = get_current_key(platform)
     if current:
         balance = check_balance(current['key'])
@@ -254,7 +248,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================
-# অ্যাডমিন কমান্ড
+# অ্যাডমিন কমান্ড (আপডেটেড)
 # ============================================================
 
 async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,10 +273,91 @@ async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if add_api_key(key, platform):
-        await update.message.reply_text(f"✅ API Key সফলভাবে যোগ করা হয়েছে!\n📱 প্ল্যাটফর্ম: {platform.capitalize()}")
-    else:
+    # যোগ করুন
+    if not add_api_key(key, platform):
         await update.message.reply_text("❌ এই API Key ইতিমধ্যে যোগ করা হয়েছে।")
+        return
+
+    # ব্যালেন্স চেক করে স্ট্যাটাস সেট করুন
+    balance = check_balance(key)
+    update_balance(key, balance)
+    if balance >= config.MIN_BALANCE:
+        update_status(key, 'active')
+        status_text = "✅ সক্রিয় (ব্যালেন্স পর্যাপ্ত)"
+    else:
+        update_status(key, 'inactive')
+        status_text = f"⚠️ নিষ্ক্রিয় (ব্যালেন্স ${balance:.6f}, ন্যূনতম ${config.MIN_BALANCE})"
+
+    await update.message.reply_text(
+        f"✅ API Key সফলভাবে যোগ করা হয়েছে!\n"
+        f"📱 প্ল্যাটফর্ম: {platform.capitalize()}\n"
+        f"💰 ব্যালেন্স: ${balance:.6f}\n"
+        f"📊 স্ট্যাটাস: {status_text}"
+    )
+
+async def activate_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """একটি কী সক্রিয় করে"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text("❌ ব্যবহার: `/activatekey <api_key>`")
+        return
+
+    key = args[0]
+    key_data = get_key_by_value(key)
+    if not key_data:
+        await update.message.reply_text("❌ এই API Key ডাটাবেসে নেই।")
+        return
+
+    balance = check_balance(key)
+    update_balance(key, balance)
+    if balance >= config.MIN_BALANCE:
+        update_status(key, 'active')
+        await update.message.reply_text(
+            f"✅ API Key `{key[:10]}...` সক্রিয় করা হয়েছে।\n"
+            f"💰 ব্যালেন্স: ${balance:.6f}"
+        )
+    else:
+        update_status(key, 'inactive')
+        await update.message.reply_text(
+            f"❌ API Key `{key[:10]}...` সক্রিয় করা সম্ভব নয়।\n"
+            f"ব্যালেন্স ${balance:.6f} যা ন্যূনতম ${config.MIN_BALANCE} এর কম।"
+        )
+
+async def check_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """একটি কী-এর ব্যালেন্স চেক করে স্ট্যাটাস আপডেট করে"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text("❌ ব্যবহার: `/checkkey <api_key>`")
+        return
+
+    key = args[0]
+    key_data = get_key_by_value(key)
+    if not key_data:
+        await update.message.reply_text("❌ এই API Key ডাটাবেসে নেই।")
+        return
+
+    balance = check_balance(key)
+    update_balance(key, balance)
+    if balance >= config.MIN_BALANCE:
+        update_status(key, 'active')
+        status_text = "✅ সক্রিয়"
+    else:
+        update_status(key, 'inactive')
+        status_text = "❌ নিষ্ক্রিয় (ব্যালেন্স কম)"
+
+    await update.message.reply_text(
+        f"🔑 API Key: `{key[:10]}...`\n"
+        f"💰 ব্যালেন্স: ${balance:.6f}\n"
+        f"📊 স্ট্যাটাস: {status_text}"
+    )
 
 async def remove_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -309,7 +384,7 @@ async def list_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = "🔑 *সব API Keys:*\n\n"
-    for k in keys[:30]:  # ৩০টি দেখাবে
+    for k in keys[:30]:
         status_icon = "✅" if k['status'] == 'active' else "❌"
         balance = k.get('balance', 0)
         text += f"{status_icon} `{k['key'][:15]}...` | {k['platform'].capitalize()} | ${balance:.4f}\n"
@@ -323,7 +398,6 @@ async def refresh_services_command(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
         return
 
-    # ক্যাশে ইনভ্যালিড করতে smm_api মডিউলে একটি ফাংশন কল করি
     from smm_api import _service_cache, _cache_time
     _service_cache.clear()
     _cache_time.clear()
@@ -338,24 +412,26 @@ def main():
 
     app = Application.builder().token(config.BOT_TOKEN).build()
 
-    # কমান্ড
+    # ইউজার কমান্ড
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("order", order_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("status", status_command))
 
-    # অ্যাডমিন
+    # অ্যাডমিন কমান্ড
     app.add_handler(CommandHandler("addkey", add_key_command))
     app.add_handler(CommandHandler("removekey", remove_key_command))
     app.add_handler(CommandHandler("listkeys", list_keys_command))
+    app.add_handler(CommandHandler("activatekey", activate_key_command))
+    app.add_handler(CommandHandler("checkkey", check_key_command))
     app.add_handler(CommandHandler("refreshservices", refresh_services_command))
 
     # ক্যালব্যাক
     app.add_handler(CallbackQueryHandler(platform_callback, pattern="^platform_"))
     app.add_handler(CallbackQueryHandler(service_callback, pattern="^service_"))
 
-    # টেক্সট হ্যান্ডলার
+    # টেক্সট
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_order_details))
 
     logger.info("🤖 বট চালু হচ্ছে...")
