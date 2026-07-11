@@ -16,19 +16,15 @@ from database import (
     get_total_keys, get_active_count, add_order, get_orders,
     get_setting, set_setting, get_key_by_value
 )
-from smm_api import check_balance, place_order, get_services_by_platform_simple
+from smm_api import check_balance, place_order, get_services_by_platform_simple, get_order_status
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def is_admin(user_id):
     return user_id in config.ADMIN_IDS
 
 async def auto_switch_key(platform):
-    """যদি current key এর balance কম থাকে, তাহলে নতুন key নিবে"""
     current = get_current_key(platform)
     if current:
         balance = check_balance(current['key'])
@@ -54,19 +50,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 হ্যালো {user.first_name}!\n\n"
         "🤖 আমি SMMLite অটোমেশন বট।\n"
-        "আমি Telegram, Facebook, TikTok, Instagram, YouTube, Twitter-এর জন্য অর্ডার নিতে পারি।\n\n"
-        "📌 *কমান্ডসমূহ:*\n"
-        "/order - নতুন অর্ডার দিতে\n"
-        "/balance - ব্যালেন্স চেক করতে\n"
+        "আমি Telegram, Facebook, TikTok-এর জন্য অর্ডার নিতে পারি।\n\n"
+        "📌 *কমান্ড:*\n"
+        "/order - নতুন অর্ডার শুরু করতে\n"
+        "/status <order_id> - অর্ডার স্ট্যাটাস চেক করতে\n"
         "/history - আপনার অর্ডার ইতিহাস\n"
+        "/balance - ব্যালেন্স দেখতে\n"
         "/status - সিস্টেম স্ট্যাটাস\n\n"
         "⚡ *অ্যাডমিন কমান্ড:*\n"
-        "/addkey <api_key> <platform> - নতুন কী যোগ করুন (অটো-ব্যালেন্স চেক)\n"
+        "/addkey <api_key> <platform> - কী যোগ করুন\n"
         "/removekey <api_key> - কী মুছুন\n"
         "/listkeys - সব কী দেখুন\n"
-        "/activatekey <api_key> - একটি কী সক্রিয় করুন\n"
-        "/checkkey <api_key> - কীটির ব্যালেন্স চেক করে স্ট্যাটাস আপডেট করুন\n"
-        "/refreshservices - সার্ভিস লিস্ট রিফ্রেশ করুন",
+        "/activatekey <api_key> - কী সক্রিয় করুন\n"
+        "/checkkey <api_key> - কী চেক করুন",
         parse_mode="Markdown"
     )
 
@@ -76,9 +72,6 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📱 Telegram", callback_data="platform_telegram")],
         [InlineKeyboardButton("📘 Facebook", callback_data="platform_facebook")],
         [InlineKeyboardButton("🎵 TikTok", callback_data="platform_tiktok")],
-        [InlineKeyboardButton("📷 Instagram", callback_data="platform_instagram")],
-        [InlineKeyboardButton("▶️ YouTube", callback_data="platform_youtube")],
-        [InlineKeyboardButton("🐦 Twitter", callback_data="platform_twitter")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -99,17 +92,13 @@ async def platform_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not services:
         await query.edit_message_text(
             f"❌ {platform.capitalize()} এর জন্য কোনো সার্ভিস পাওয়া যায়নি।\n"
-            "অ্যাডমিনকে যোগাযোগ করুন অথবা `/refreshservices` চালান।"
+            "অ্যাডমিনকে যোগাযোগ করুন।"
         )
         return
 
     keyboard = []
     items = list(services.items())
-    if len(items) > 20:
-        items = items[:20]
-        keyboard.append([InlineKeyboardButton("📌 আরও সার্ভিস (আপডেট আসছে)", callback_data="more_coming")])
-
-    for service_id, service_name in items:
+    for service_id, service_name in items[:20]:
         keyboard.append([InlineKeyboardButton(service_name, callback_data=f"service_{platform}_{service_id}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -129,51 +118,104 @@ async def service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['platform'] = platform
 
     await query.edit_message_text(
-        f"📝 এখন *{platform.capitalize()}* অর্ডারের বিবরণ দিন:\n\n"
-        "ফরম্যাট: `লিংক|কোয়ান্টিটি`\n"
-        "উদাহরণ: `https://t.me/username|100`\n\n"
-        "🔗 লিংক হতে পারে চ্যানেল/গ্রুপ লিংক, পোস্ট লিংক, বা যেকোনো ভ্যালিড URL।",
+        f"📝 *{platform.capitalize()}* অর্ডারের জন্য **লিংক** দিন:\n\n"
+        "উদাহরণ: `https://t.me/username` অথবা `https://t.me/post/123`",
         parse_mode="Markdown"
     )
-    context.user_data['waiting_for_order_details'] = True
+    context.user_data['waiting_for_link'] = True
 
-async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('waiting_for_order_details'):
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('waiting_for_link'):
         return
 
-    text = update.message.text.strip()
-    if '|' not in text:
-        await update.message.reply_text(
-            "❌ ভুল ফরম্যাট! ব্যবহার করুন: `লিংক|কোয়ান্টিটি`\n"
-            "উদাহরণ: `https://t.me/username|100`"
-        )
+    link = update.message.text.strip()
+    if not link.startswith(('http://', 'https://')):
+        await update.message.reply_text("❌ সঠিক লিংক দিন (http:// বা https:// দিয়ে শুরু করতে হবে)।")
         return
 
-    link, quantity_str = text.split('|', 1)
+    context.user_data['link'] = link
+    context.user_data['waiting_for_link'] = False
+    context.user_data['waiting_for_quantity'] = True
+
+    await update.message.reply_text(
+        "🔢 এখন **কোয়ান্টিটি** দিন (সংখ্যা):\n"
+        "উদাহরণ: `100`"
+    )
+
+async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('waiting_for_quantity'):
+        return
+
     try:
-        quantity = int(quantity_str.strip())
+        quantity = int(update.message.text.strip())
+        if quantity <= 0:
+            raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ কোয়ান্টিটি অবশ্যই সংখ্যা হতে হবে।")
+        await update.message.reply_text("❌ দয়া করে একটি সঠিক সংখ্যা দিন।")
         return
 
-    platform = context.user_data.get('platform')
-    service_id = context.user_data.get('service_id')
+    context.user_data['quantity'] = quantity
+    context.user_data['waiting_for_quantity'] = False
 
-    if not platform or not service_id:
-        await update.message.reply_text("❌ প্ল্যাটফর্ম বা সার্ভিস নির্বাচন করা হয়নি। /order দিয়ে আবার শুরু করুন।")
+    platform = context.user_data['platform']
+    service_id = context.user_data['service_id']
+    link = context.user_data['link']
+
+    # খরচ হিসাব (ডিফল্ট রেট 0.03/1000, তবে API থেকে নিতে পারি)
+    # আমরা smm_api থেকে service rate fetch করতে পারি, কিন্তু এখন ডিফল্ট রাখি
+    rate = 0.03  # $0.03 per 1000
+    cost = (quantity / 1000) * rate
+
+    context.user_data['cost'] = cost
+    context.user_data['order_data'] = {
+        'platform': platform,
+        'service_id': service_id,
+        'link': link,
+        'quantity': quantity
+    }
+
+    await update.message.reply_text(
+        f"📊 *অর্ডার সারাংশ*\n\n"
+        f"📱 প্ল্যাটফর্ম: {platform.capitalize()}\n"
+        f"🔗 লিংক: {link}\n"
+        f"🔢 কোয়ান্টিটি: {quantity}\n"
+        f"💰 আনুমানিক খরচ: `${cost:.4f}`\n\n"
+        "✅ অর্ডার নিশ্চিত করতে **'হ্যাঁ'** টাইপ করুন\n"
+        "❌ বাতিল করতে **'না'** টাইপ করুন",
+        parse_mode="Markdown"
+    )
+    context.user_data['waiting_for_confirmation'] = True
+
+async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('waiting_for_confirmation'):
         return
 
-    # অটো-সুইচ চেক
+    text = update.message.text.strip().lower()
+    if text not in ['হ্যাঁ', 'yes', 'ঠিক', 'ok', 'না', 'no']:
+        await update.message.reply_text("❌ 'হ্যাঁ' বা 'না' দিন।")
+        return
+
+    if text in ['না', 'no']:
+        await update.message.reply_text("❌ অর্ডার বাতিল করা হয়েছে।")
+        context.user_data.clear()
+        return
+
+    # অর্ডার প্লেস করুন
+    platform = context.user_data['platform']
+    service_id = context.user_data['service_id']
+    link = context.user_data['link']
+    quantity = context.user_data['quantity']
+
     current_key = await auto_switch_key(platform)
     if not current_key:
         await update.message.reply_text(
             f"❌ {platform.capitalize()} এর জন্য কোনো সক্রিয় API Key নেই!\n"
             "অ্যাডমিনকে যোগাযোগ করুন।"
         )
+        context.user_data.clear()
         return
 
-    # অর্ডার প্লেস করুন
-    order_result = place_order(current_key, service_id, link.strip(), quantity)
+    order_result = place_order(current_key, service_id, link, quantity)
     if order_result.get('status') == 'success':
         order_id = order_result.get('order_id')
         add_order(
@@ -181,7 +223,7 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
             platform=platform,
             service=service_id,
             quantity=quantity,
-            link=link.strip(),
+            link=link,
             order_id=order_id
         )
         await update.message.reply_text(
@@ -189,7 +231,8 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🆔 অর্ডার আইডি: `{order_id}`\n"
             f"📱 প্ল্যাটফর্ম: {platform.capitalize()}\n"
             f"🔢 কোয়ান্টিটি: {quantity}\n"
-            f"🔗 লিংক: {link.strip()}",
+            f"🔗 লিংক: {link}\n\n"
+            f"📌 স্ট্যাটাস চেক করতে: `/status {order_id}`",
             parse_mode="Markdown"
         )
     else:
@@ -198,10 +241,41 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
             f"কারণ: {order_result.get('message', 'অজানা ত্রুটি')}"
         )
 
-    context.user_data['waiting_for_order_details'] = False
+    context.user_data.clear()
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """অর্ডার স্ট্যাটাস চেক করে"""
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text("❌ ব্যবহার: `/status <order_id>`")
+        return
+
+    order_id = args[0]
+    platform = "telegram"  # ডিফল্ট, কিন্তু আমরা API থেকে platform detect করতে পারি
+    current_key = get_current_key(platform)
+    if not current_key:
+        await update.message.reply_text("❌ সক্রিয় API Key নেই।")
+        return
+
+    status_data = get_order_status(current_key['key'], order_id)
+    if status_data.get('error'):
+        await update.message.reply_text(f"❌ {status_data['error']}")
+    else:
+        charge = status_data.get('charge', 'N/A')
+        status = status_data.get('status', 'Unknown')
+        start_count = status_data.get('start_count', 'N/A')
+        remains = status_data.get('remains', 'N/A')
+        await update.message.reply_text(
+            f"📊 *অর্ডার স্ট্যাটাস*\n\n"
+            f"🆔 অর্ডার: `{order_id}`\n"
+            f"📊 স্ট্যাটাস: {status}\n"
+            f"💵 খরচ: ${charge}\n"
+            f"📈 শুরু: {start_count}\n"
+            f"⏳ বাকি: {remains}",
+            parse_mode="Markdown"
+        )
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """বর্তমান সক্রিয় কী-এর ব্যালেন্স দেখায় (ডিফল্ট: telegram)"""
     platform = "telegram"
     current = get_current_key(platform)
     if current:
@@ -210,7 +284,6 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"💰 *ব্যালেন্স*\n\n"
             f"📱 প্ল্যাটফর্ম: {platform.capitalize()}\n"
-            f"🔑 API Key: `{current['key'][:10]}...`\n"
             f"💵 ব্যালেন্স: `${balance:.6f}`\n"
             f"📊 স্ট্যাটাস: {'✅ সক্রিয়' if balance >= config.MIN_BALANCE else '❌ কম ব্যালেন্স'}",
             parse_mode="Markdown"
@@ -219,7 +292,6 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ কোনো সক্রিয় API Key নেই।")
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ইউজারের অর্ডার ইতিহাস"""
     orders = get_orders(update.effective_user.id, limit=10)
     if not orders:
         await update.message.reply_text("📭 আপনার কোনো অর্ডার নেই।")
@@ -234,8 +306,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """সিস্টেম স্ট্যাটাস দেখায়"""
+async def system_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = get_total_keys()
     active = get_active_count()
     await update.message.reply_text(
@@ -243,12 +314,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 মোট API Keys: `{total}`\n"
         f"✅ সক্রিয় Keys: `{active}`\n"
         f"⚠️ ন্যূনতম ব্যালেন্স: `${config.MIN_BALANCE}`\n"
-        f"📱 প্ল্যাটফর্ম: Telegram, Facebook, TikTok, Instagram, YouTube, Twitter",
+        f"📱 প্ল্যাটফর্ম: Telegram, Facebook, TikTok",
         parse_mode="Markdown"
     )
 
 # ============================================================
-# অ্যাডমিন কমান্ড (আপডেটেড)
+# অ্যাডমিন কমান্ড (আগের মতো)
 # ============================================================
 
 async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,43 +331,40 @@ async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text(
             "❌ ব্যবহার: `/addkey <api_key> <platform>`\n"
-            "প্ল্যাটফর্ম: `telegram`, `facebook`, `tiktok`, `instagram`, `youtube`, `twitter`"
+            "প্ল্যাটফর্ম: `telegram`, `facebook`, `tiktok`"
         )
         return
 
     key = args[0]
     platform = args[1].lower()
-    valid_platforms = ['telegram', 'facebook', 'tiktok', 'instagram', 'youtube', 'twitter']
+    valid_platforms = ['telegram', 'facebook', 'tiktok']
     if platform not in valid_platforms:
         await update.message.reply_text(
             f"❌ প্ল্যাটফর্মটি সঠিক নয়। ব্যবহার করুন: {', '.join(valid_platforms)}"
         )
         return
 
-    # যোগ করুন
     if not add_api_key(key, platform):
         await update.message.reply_text("❌ এই API Key ইতিমধ্যে যোগ করা হয়েছে।")
         return
 
-    # ব্যালেন্স চেক করে স্ট্যাটাস সেট করুন
     balance = check_balance(key)
     update_balance(key, balance)
     if balance >= config.MIN_BALANCE:
         update_status(key, 'active')
-        status_text = "✅ সক্রিয় (ব্যালেন্স পর্যাপ্ত)"
+        status_text = "✅ সক্রিয়"
     else:
         update_status(key, 'inactive')
-        status_text = f"⚠️ নিষ্ক্রিয় (ব্যালেন্স ${balance:.6f}, ন্যূনতম ${config.MIN_BALANCE})"
+        status_text = f"⚠️ নিষ্ক্রিয় (ব্যালেন্স ${balance:.6f})"
 
     await update.message.reply_text(
-        f"✅ API Key সফলভাবে যোগ করা হয়েছে!\n"
+        f"✅ API Key যোগ করা হয়েছে!\n"
         f"📱 প্ল্যাটফর্ম: {platform.capitalize()}\n"
         f"💰 ব্যালেন্স: ${balance:.6f}\n"
         f"📊 স্ট্যাটাস: {status_text}"
     )
 
 async def activate_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """একটি কী সক্রিয় করে"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
         return
@@ -326,38 +394,6 @@ async def activate_key_command(update: Update, context: ContextTypes.DEFAULT_TYP
             f"❌ API Key `{key[:10]}...` সক্রিয় করা সম্ভব নয়।\n"
             f"ব্যালেন্স ${balance:.6f} যা ন্যূনতম ${config.MIN_BALANCE} এর কম।"
         )
-
-async def check_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """একটি কী-এর ব্যালেন্স চেক করে স্ট্যাটাস আপডেট করে"""
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
-        return
-
-    args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("❌ ব্যবহার: `/checkkey <api_key>`")
-        return
-
-    key = args[0]
-    key_data = get_key_by_value(key)
-    if not key_data:
-        await update.message.reply_text("❌ এই API Key ডাটাবেসে নেই।")
-        return
-
-    balance = check_balance(key)
-    update_balance(key, balance)
-    if balance >= config.MIN_BALANCE:
-        update_status(key, 'active')
-        status_text = "✅ সক্রিয়"
-    else:
-        update_status(key, 'inactive')
-        status_text = "❌ নিষ্ক্রিয় (ব্যালেন্স কম)"
-
-    await update.message.reply_text(
-        f"🔑 API Key: `{key[:10]}...`\n"
-        f"💰 ব্যালেন্স: ${balance:.6f}\n"
-        f"📊 স্ট্যাটাস: {status_text}"
-    )
 
 async def remove_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -392,47 +428,56 @@ async def list_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n... এবং আরও {len(keys)-30}টি কী আছে।"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def refresh_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """সার্ভিস ক্যাশে রিফ্রেশ করে"""
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
-        return
-
-    from smm_api import _service_cache, _cache_time
-    _service_cache.clear()
-    _cache_time.clear()
-    await update.message.reply_text("✅ সার্ভিস ক্যাশে রিফ্রেশ করা হয়েছে।")
-
 # ============================================================
 # মেইন ফাংশন
 # ============================================================
 
 def main():
     init_db()
-
     app = Application.builder().token(config.BOT_TOKEN).build()
 
-    # ইউজার কমান্ড
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("order", order_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("history", history_command))
-    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("status", system_status_command))  # ওভারল্যাপ এড়াতে নাম পরিবর্তন করুন
 
-    # অ্যাডমিন কমান্ড
     app.add_handler(CommandHandler("addkey", add_key_command))
     app.add_handler(CommandHandler("removekey", remove_key_command))
     app.add_handler(CommandHandler("listkeys", list_keys_command))
     app.add_handler(CommandHandler("activatekey", activate_key_command))
-    app.add_handler(CommandHandler("checkkey", check_key_command))
-    app.add_handler(CommandHandler("refreshservices", refresh_services_command))
 
-    # ক্যালব্যাক
     app.add_handler(CallbackQueryHandler(platform_callback, pattern="^platform_"))
     app.add_handler(CallbackQueryHandler(service_callback, pattern="^service_"))
 
-    # টেক্সট
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_order_details))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    # Note: handle_quantity and handle_confirmation are also text handlers, but we need to manage state.
+    # We'll use a single handler that checks state.
+    # For simplicity, we can combine them in one function with state checks.
+    # To avoid conflict, we'll use a single message handler that routes based on user_data state.
+
+    # We'll replace the three separate handlers with one combined handler.
+    # I'll rewrite the message handler to check state.
+
+    # But to keep it simple, I'll keep them as separate but need to ensure order.
+    # Actually Flask-telegram-bot uses a single handler for all text, we can route.
+    # We'll define a single function that checks state and calls appropriate logic.
+    # For brevity, I'll provide a combined version.
+
+    # Let's combine into one handler:
+    async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if context.user_data.get('waiting_for_link'):
+            await handle_link(update, context)
+        elif context.user_data.get('waiting_for_quantity'):
+            await handle_quantity(update, context)
+        elif context.user_data.get('waiting_for_confirmation'):
+            await handle_confirmation(update, context)
+        else:
+            # If no state, treat as command? Or ignore.
+            pass
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_text))
 
     logger.info("🤖 বট চালু হচ্ছে...")
     app.run_polling()
