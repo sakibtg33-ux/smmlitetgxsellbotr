@@ -43,11 +43,15 @@ def init_db():
     conn.commit()
     conn.close()
 
-# API Keys
+# ===================== API Keys =====================
+
 def add_api_key(key, platform):
     conn = get_db()
     try:
-        conn.execute("INSERT INTO api_keys (key, platform) VALUES (?, ?)", (key, platform))
+        conn.execute(
+            "INSERT INTO api_keys (key, platform) VALUES (?, ?)",
+            (key, platform)
+        )
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -67,11 +71,40 @@ def get_all_keys():
     conn.close()
     return [dict(row) for row in rows]
 
-def get_active_keys():
+def get_active_keys(platform=None):
     conn = get_db()
-    rows = conn.execute("SELECT * FROM api_keys WHERE status = 'active'").fetchall()
+    query = "SELECT * FROM api_keys WHERE status = 'active'"
+    params = []
+    if platform:
+        query += " AND platform = ?"
+        params.append(platform)
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def get_key_by_value(key):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM api_keys WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_current_key(platform):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM api_keys WHERE platform = ? AND status = 'active' LIMIT 1",
+        (platform,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_next_key(platform):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM api_keys WHERE platform = ? AND status = 'active' ORDER BY RANDOM() LIMIT 1",
+        (platform,)
+    ).fetchall()
+    conn.close()
+    return dict(rows[0]) if rows else None
 
 def update_balance(key, balance):
     conn = get_db()
@@ -85,40 +118,25 @@ def update_status(key, status):
     conn.commit()
     conn.close()
 
-def get_current_key(platform):
-    """একটি প্ল্যাটফর্মের জন্য সক্রিয় কী খুঁজে বের করে"""
-    conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM api_keys WHERE platform = ? AND status = 'active' LIMIT 1",
-        (platform,)
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-def get_next_key(platform):
-    """ব্যালেন্স কমে গেলে পরবর্তী কী নির্বাচন করে"""
-    conn = get_db()
-    # active keys থেকে র্যান্ডম একটি
-    rows = conn.execute(
-        "SELECT * FROM api_keys WHERE platform = ? AND status = 'active' ORDER BY RANDOM() LIMIT 1",
-        (platform,)
-    ).fetchall()
-    conn.close()
-    return dict(rows[0]) if rows else None
-
 def get_total_keys():
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) FROM api_keys").fetchone()[0]
     conn.close()
     return count
 
-def get_active_count():
+def get_active_count(platform=None):
     conn = get_db()
-    count = conn.execute("SELECT COUNT(*) FROM api_keys WHERE status = 'active'").fetchone()[0]
+    query = "SELECT COUNT(*) FROM api_keys WHERE status = 'active'"
+    params = []
+    if platform:
+        query += " AND platform = ?"
+        params.append(platform)
+    count = conn.execute(query, params).fetchone()[0]
     conn.close()
     return count
 
-# Orders
+# ===================== Orders =====================
+
 def add_order(user_id, platform, service, quantity, link, order_id=None):
     conn = get_db()
     conn.execute(
@@ -140,7 +158,8 @@ def get_orders(user_id=None, limit=20):
     conn.close()
     return [dict(row) for row in rows]
 
-# Settings
+# ===================== Settings =====================
+
 def get_setting(key, default=None):
     conn = get_db()
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
