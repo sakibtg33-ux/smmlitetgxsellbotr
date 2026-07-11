@@ -17,9 +17,15 @@ from database import (
     get_total_keys, get_active_count, add_order, get_orders,
     get_setting, set_setting
 )
-from smm_api import check_balance, place_order, get_services
+from smm_api import (
+    check_balance, place_order, get_services_by_platform_simple,
+    fetch_services
+)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -35,11 +41,8 @@ async def auto_switch_key(platform):
         balance = check_balance(current['key'])
         update_balance(current['key'], balance)
         if balance < config.MIN_BALANCE:
-            # কী ডিঅ্যাকটিভেট করুন
             update_status(current['key'], 'inactive')
             logger.info(f"🔴 Key {current['key'][:10]}... removed (balance: {balance})")
-
-            # নতুন কী খুঁজুন
             new_key = get_next_key(platform)
             if new_key:
                 logger.info(f"🔄 Switched to new key: {new_key['key'][:10]}...")
@@ -50,7 +53,7 @@ async def auto_switch_key(platform):
     return current['key'] if current else None
 
 # ============================================================
-# বট কমান্ড হ্যান্ডলার
+# ইউজার কমান্ড হ্যান্ডলার
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,16 +61,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 হ্যালো {user.first_name}!\n\n"
         "🤖 আমি SMMLite অটোমেশন বট।\n"
-        "আমি Telegram, Facebook, TikTok-এর জন্য অর্ডার নিতে পারি।\n\n"
-        "📌 কমান্ডসমূহ:\n"
+        "আমি Telegram, Facebook, TikTok, Instagram, YouTube, Twitter-এর জন্য অর্ডার নিতে পারি।\n\n"
+        "📌 *কমান্ডসমূহ:*\n"
         "/order - নতুন অর্ডার দিতে\n"
         "/balance - ব্যালেন্স চেক করতে\n"
         "/history - আপনার অর্ডার ইতিহাস\n"
         "/status - সিস্টেম স্ট্যাটাস\n\n"
-        "⚡ অ্যাডমিন কমান্ড:\n"
+        "⚡ *অ্যাডমিন কমান্ড:*\n"
         "/addkey <api_key> <platform> - নতুন কী যোগ করুন\n"
         "/removekey <api_key> - কী মুছুন\n"
-        "/listkeys - সব কী দেখুন",
+        "/listkeys - সব কী দেখুন\n"
+        "/refreshservices - সার্ভিস লিস্ট রিফ্রেশ করুন",
         parse_mode="Markdown"
     )
 
@@ -77,6 +81,9 @@ async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📱 Telegram", callback_data="platform_telegram")],
         [InlineKeyboardButton("📘 Facebook", callback_data="platform_facebook")],
         [InlineKeyboardButton("🎵 TikTok", callback_data="platform_tiktok")],
+        [InlineKeyboardButton("📷 Instagram", callback_data="platform_instagram")],
+        [InlineKeyboardButton("▶️ YouTube", callback_data="platform_youtube")],
+        [InlineKeyboardButton("🐦 Twitter", callback_data="platform_twitter")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -90,10 +97,28 @@ async def platform_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     platform = query.data.replace("platform_", "")
     context.user_data['platform'] = platform
 
-    services = get_services(platform)
+    current = get_current_key(platform)
+    api_key = current['key'] if current else None
+
+    services = get_services_by_platform_simple(platform, api_key)
+    if not services:
+        await query.edit_message_text(
+            f"❌ {platform.capitalize()} এর জন্য কোনো সার্ভিস পাওয়া যায়নি।\n"
+            "অ্যাডমিনকে যোগাযোগ করুন অথবা `/refreshservices` চালান।"
+        )
+        return
+
+    # ক্যাটাগরি অনুযায়ী গ্রুপ করতে চাইলে এখানে লজিক যোগ করা যেতে পারে
     keyboard = []
-    for service_id, service_name in services.items():
+    # ২০টির বেশি হলে পেজিনেশন (সহজ সমাধান: ২০টি দেখিয়ে "আরও...")
+    items = list(services.items())
+    if len(items) > 20:
+        items = items[:20]
+        keyboard.append([InlineKeyboardButton("📌 আরও সার্ভিস (আপডেট আসছে)", callback_data="more_coming")])
+
+    for service_id, service_name in items:
         keyboard.append([InlineKeyboardButton(service_name, callback_data=f"service_{platform}_{service_id}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
         f"✅ প্ল্যাটফর্ম: *{platform.capitalize()}*\nএখন সার্ভিস নির্বাচন করুন:",
@@ -124,7 +149,10 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = update.message.text.strip()
     if '|' not in text:
-        await update.message.reply_text("❌ ভুল ফরম্যাট! ব্যবহার করুন: `লিংক|কোয়ান্টিটি`")
+        await update.message.reply_text(
+            "❌ ভুল ফরম্যাট! ব্যবহার করুন: `লিংক|কোয়ান্টিটি`\n"
+            "উদাহরণ: `https://t.me/username|100`"
+        )
         return
 
     link, quantity_str = text.split('|', 1)
@@ -137,6 +165,10 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
     platform = context.user_data.get('platform')
     service_id = context.user_data.get('service_id')
 
+    if not platform or not service_id:
+        await update.message.reply_text("❌ প্ল্যাটফর্ম বা সার্ভিস নির্বাচন করা হয়নি। /order দিয়ে আবার শুরু করুন।")
+        return
+
     # অটো-সুইচ চেক
     current_key = await auto_switch_key(platform)
     if not current_key:
@@ -148,7 +180,6 @@ async def handle_order_details(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # অর্ডার প্লেস করুন
     order_result = place_order(current_key, service_id, link.strip(), quantity)
-
     if order_result.get('status') == 'success':
         order_id = order_result.get('order_id')
         add_order(
@@ -218,7 +249,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 মোট API Keys: `{total}`\n"
         f"✅ সক্রিয় Keys: `{active}`\n"
         f"⚠️ ন্যূনতম ব্যালেন্স: `${config.MIN_BALANCE}`\n"
-        f"📱 প্ল্যাটফর্ম: Telegram, Facebook, TikTok",
+        f"📱 প্ল্যাটফর্ম: Telegram, Facebook, TikTok, Instagram, YouTube, Twitter",
         parse_mode="Markdown"
     )
 
@@ -235,14 +266,17 @@ async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text(
             "❌ ব্যবহার: `/addkey <api_key> <platform>`\n"
-            "প্ল্যাটফর্ম: `telegram`, `facebook`, `tiktok`"
+            "প্ল্যাটফর্ম: `telegram`, `facebook`, `tiktok`, `instagram`, `youtube`, `twitter`"
         )
         return
 
     key = args[0]
     platform = args[1].lower()
-    if platform not in ['telegram', 'facebook', 'tiktok']:
-        await update.message.reply_text("❌ প্ল্যাটফর্মটি সঠিক নয়। ব্যবহার করুন: telegram, facebook, tiktok")
+    valid_platforms = ['telegram', 'facebook', 'tiktok', 'instagram', 'youtube', 'twitter']
+    if platform not in valid_platforms:
+        await update.message.reply_text(
+            f"❌ প্ল্যাটফর্মটি সঠিক নয়। ব্যবহার করুন: {', '.join(valid_platforms)}"
+        )
         return
 
     if add_api_key(key, platform):
@@ -275,12 +309,25 @@ async def list_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = "🔑 *সব API Keys:*\n\n"
-    for k in keys[:20]:  # ২০টি দেখাবে
+    for k in keys[:30]:  # ৩০টি দেখাবে
         status_icon = "✅" if k['status'] == 'active' else "❌"
-        text += f"{status_icon} `{k['key'][:15]}...` | {k['platform'].capitalize()} | ${k['balance']:.4f}\n"
-    if len(keys) > 20:
-        text += f"\n... এবং আরও {len(keys)-20}টি কী আছে।"
+        balance = k.get('balance', 0)
+        text += f"{status_icon} `{k['key'][:15]}...` | {k['platform'].capitalize()} | ${balance:.4f}\n"
+    if len(keys) > 30:
+        text += f"\n... এবং আরও {len(keys)-30}টি কী আছে।"
     await update.message.reply_text(text, parse_mode="Markdown")
+
+async def refresh_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """সার্ভিস ক্যাশে রিফ্রেশ করে"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ এই কমান্ডটি শুধুমাত্র অ্যাডমিনদের জন্য।")
+        return
+
+    # ক্যাশে ইনভ্যালিড করতে smm_api মডিউলে একটি ফাংশন কল করি
+    from smm_api import _service_cache, _cache_time
+    _service_cache.clear()
+    _cache_time.clear()
+    await update.message.reply_text("✅ সার্ভিস ক্যাশে রিফ্রেশ করা হয়েছে।")
 
 # ============================================================
 # মেইন ফাংশন
@@ -302,6 +349,7 @@ def main():
     app.add_handler(CommandHandler("addkey", add_key_command))
     app.add_handler(CommandHandler("removekey", remove_key_command))
     app.add_handler(CommandHandler("listkeys", list_keys_command))
+    app.add_handler(CommandHandler("refreshservices", refresh_services_command))
 
     # ক্যালব্যাক
     app.add_handler(CallbackQueryHandler(platform_callback, pattern="^platform_"))
